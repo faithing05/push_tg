@@ -1,0 +1,5 @@
+telethon
+requests
+python-socks[asyncio]
+qrcode
+python-dotenv

@@ -2,6 +2,16 @@ import os
 
 import requests
 from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
+from dotenv import load_dotenv
+
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
+
+
+load_dotenv()
 
 
 # Данные берутся из переменных окружения, чтобы не хранить секреты в коде.
@@ -10,6 +20,8 @@ API_ID = os.getenv("TG_API_ID")
 API_HASH = os.getenv("TG_API_HASH")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_ID = os.getenv("VK_USER_ID")
+AUTH_MODE = os.getenv("TG_AUTH_MODE", "phone").strip().lower()
+DEBUG_LOG = os.getenv("DEBUG_LOG", "1").strip() == "1"
 
 # Имя файла сессии Telethon
 SESSION_NAME = "tg_userbot_session"
@@ -62,6 +74,10 @@ def validate_config() -> bool:
             print("Переменная PROXY_PORT должна быть целым числом.")
             return False
 
+    if AUTH_MODE not in {"phone", "qr"}:
+        print("Переменная TG_AUTH_MODE должна быть 'phone' или 'qr'.")
+        return False
+
     return True
 
 
@@ -96,6 +112,12 @@ def build_contact_name(user) -> str:
     return full_name or "Без имени"
 
 
+def log_debug(message: str) -> None:
+    """Печатает отладочные сообщения, если включен DEBUG_LOG."""
+    if DEBUG_LOG:
+        print(f"[DEBUG] {message}")
+
+
 def send_vk_notification(contact_name: str) -> None:
     """Отправляет уведомление в личные сообщения VK."""
     message_text = f"Получено новое сообщение в Telegram от контакта: {contact_name}"
@@ -127,19 +149,71 @@ def send_vk_notification(contact_name: str) -> None:
 
 async def handle_new_private_message(event) -> None:
     """Обрабатывает входящие личные сообщения."""
+    log_debug(
+        "Получено новое сообщение: "
+        f"private={event.is_private}, out={event.out}, sender_id={event.sender_id}"
+    )
+
+    if event.out:
+        log_debug("Сообщение пропущено: это исходящее сообщение")
+        return
+
     if not event.is_private:
+        log_debug("Сообщение пропущено: это не личный диалог")
         return
 
     sender = await event.get_sender()
     if sender is None:
-        return
-
-    # Отправляем уведомление только для контактов или взаимных контактов.
-    if not (getattr(sender, "contact", False) or getattr(sender, "mutual_contact", False)):
+        log_debug("Не удалось получить отправителя сообщения")
         return
 
     contact_name = build_contact_name(sender)
+    is_contact = getattr(sender, "contact", False)
+    is_mutual_contact = getattr(sender, "mutual_contact", False)
+    log_debug(
+        "Отправитель: "
+        f"{contact_name}, contact={is_contact}, mutual_contact={is_mutual_contact}, "
+        f"username={getattr(sender, 'username', None)}"
+    )
+
+    # Отправляем уведомление только для контактов или взаимных контактов.
+    if not (is_contact or is_mutual_contact):
+        log_debug("Сообщение пропущено: отправитель не является контактом Telegram")
+        return
+
+    log_debug(f"Отправитель прошел фильтр контактов: {contact_name}")
     send_vk_notification(contact_name)
+
+
+def authorize_with_phone() -> None:
+    """Стандартная авторизация по номеру телефона и коду Telegram."""
+    client.start()
+
+
+async def authorize_with_qr() -> None:
+    """Авторизация через QR, если аккаунт уже открыт в Telegram на другом устройстве."""
+    await client.connect()
+
+    if await client.is_user_authorized():
+        return
+
+    qr_login = await client.qr_login()
+    print("Откройте Telegram на телефоне: Настройки -> Устройства -> Подключить устройство.")
+    if qrcode is not None:
+        print("Отсканируйте QR-код ниже:")
+        qr = qrcode.QRCode(border=1)
+        qr.add_data(qr_login.url)
+        qr.print_ascii(invert=True)
+    else:
+        print("Пакет qrcode не установлен, поэтому выводится ссылка для генерации QR:")
+        print(qr_login.url)
+        print("Для показа QR прямо в консоли установите: pip install qrcode")
+
+    try:
+        await qr_login.wait()
+    except SessionPasswordNeededError:
+        password = input("Введите пароль двухэтапной аутентификации Telegram: ")
+        await client.sign_in(password=password)
 
 
 def main() -> None:
@@ -150,14 +224,20 @@ def main() -> None:
         return
 
     client = build_telegram_client()
-    client.add_event_handler(handle_new_private_message, events.NewMessage(incoming=True))
+    client.add_event_handler(handle_new_private_message, events.NewMessage())
     print("Запуск Telegram userbot...")
-    print("При первом запуске Telethon запросит номер телефона и код подтверждения.")
+    if AUTH_MODE == "qr":
+        print("Выбран вход через QR без SMS.")
+    else:
+        print("При первом запуске Telethon запросит номер телефона и код подтверждения.")
     if PROXY_HOST and PROXY_PORT:
         print(f"Используется SOCKS5-прокси: {PROXY_HOST}:{PROXY_PORT}")
 
     try:
-        client.start()
+        if AUTH_MODE == "qr":
+            client.loop.run_until_complete(authorize_with_qr())
+        else:
+            authorize_with_phone()
     except TimeoutError:
         print("Не удалось подключиться к серверам Telegram: превышено время ожидания.")
         print("Проверьте интернет, VPN/прокси, фаервол или попробуйте другую сеть.")
@@ -169,6 +249,11 @@ def main() -> None:
     except Exception as error:
         print(f"Ошибка запуска Telegram client: {error}")
         return
+
+    me = client.loop.run_until_complete(client.get_me())
+    log_debug(
+        f"Авторизован как id={me.id}, username={me.username}, phone={getattr(me, 'phone', None)}"
+    )
 
     print("Userbot запущен. Ожидание новых личных сообщений...")
     client.run_until_disconnected()
