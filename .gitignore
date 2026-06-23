@@ -1,1 +1,4 @@
-/tg_userbot_session.session
+.env
+*.session
+*.session-journal
+__pycache__/
