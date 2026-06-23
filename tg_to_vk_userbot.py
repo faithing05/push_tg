@@ -3,6 +3,7 @@ import os
 import requests
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
+from telethon.tl import types
 from dotenv import load_dotenv
 
 try:
@@ -39,6 +40,49 @@ PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
 
 VK_API_URL = "https://api.vk.com/method/messages.send"
 VK_API_VERSION = "5.131"
+
+MEDIA_TYPE_LABELS = (
+    (types.MessageMediaGeoLive, "геопозиция"),
+    (types.MessageMediaVenue, "место"),
+    (types.MessageMediaContact, "контакт"),
+    (types.MessageMediaPoll, "опрос"),
+    (types.MessageMediaDice, "кубик"),
+    (types.MessageMediaGame, "игра"),
+    (types.MessageMediaInvoice, "счет"),
+    (types.MessageMediaWebPage, "ссылка"),
+    (types.MessageMediaUnsupported, "вложение"),
+)
+
+ACTION_TYPE_LABELS = (
+    (types.MessageActionPhoneCall, "звонок"),
+    (types.MessageActionPinMessage, "закрепленное сообщение"),
+    (types.MessageActionChatAddUser, "приглашение в чат"),
+    (types.MessageActionChatJoinedByLink, "вход по ссылке"),
+    (types.MessageActionChatCreate, "создание чата"),
+    (types.MessageActionChatDeletePhoto, "удаление фото чата"),
+    (types.MessageActionChatDeleteUser, "выход из чата"),
+    (types.MessageActionChatEditPhoto, "обновление фото чата"),
+    (types.MessageActionChatEditTitle, "изменение названия чата"),
+    (types.MessageActionHistoryClear, "очистка истории"),
+    (types.MessageActionGameScore, "результат игры"),
+    (types.MessageActionPaymentSent, "оплата"),
+    (types.MessageActionPaymentSentMe, "платеж"),
+    (types.MessageActionScreenshotTaken, "скриншот"),
+    (types.MessageActionSecureValuesSent, "отправка данных"),
+    (types.MessageActionSecureValuesSentMe, "получение данных"),
+    (types.MessageActionContactSignUp, "регистрация в Telegram"),
+    (types.MessageActionGeoProximityReached, "геоприближение"),
+    (types.MessageActionGroupCall, "групповой звонок"),
+    (types.MessageActionInviteToGroupCall, "приглашение в звонок"),
+    (types.MessageActionSetMessagesTTL, "таймер удаления сообщений"),
+    (types.MessageActionTopicCreate, "создание темы"),
+    (types.MessageActionTopicEdit, "изменение темы"),
+    (types.MessageActionSuggestProfilePhoto, "предложение фото профиля"),
+    (types.MessageActionRequestedPeer, "запрос контакта"),
+    (types.MessageActionBotAllowed, "запуск бота"),
+    (types.MessageActionWebViewDataSent, "данные из web app"),
+    (types.MessageActionWebViewDataSentMe, "данные в web app"),
+)
 
 
 def validate_config() -> bool:
@@ -132,10 +176,40 @@ def build_message_content(message) -> str:
         return "видео"
     if getattr(message, "voice", None):
         return "голосовое"
+    if getattr(message, "audio", None):
+        return "аудио"
     if getattr(message, "sticker", None):
         return "стикер"
+    if getattr(message, "gif", None):
+        return "gif"
+    if getattr(message, "contact", None):
+        return "контакт"
+    if getattr(message, "geo", None):
+        return "геопозиция"
+    if getattr(message, "venue", None):
+        return "место"
+    if getattr(message, "poll", None):
+        return "опрос"
+    if getattr(message, "dice", None):
+        return "кубик"
+    if getattr(message, "game", None):
+        return "игра"
+    if getattr(message, "invoice", None):
+        return "счет"
     if getattr(message, "document", None):
         return "документ"
+
+    media = getattr(message, "media", None)
+    for media_type, label in MEDIA_TYPE_LABELS:
+        if isinstance(media, media_type):
+            return label
+
+    action = getattr(message, "action", None)
+    for action_type, label in ACTION_TYPE_LABELS:
+        if isinstance(action, action_type):
+            return label
+    if action is not None:
+        return "служебное сообщение"
 
     return "[Сообщение без текста]"
 
