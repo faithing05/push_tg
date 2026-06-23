@@ -197,7 +197,11 @@ class MainWindow(QMainWindow):
         misc_group = QGroupBox("Прочее")
         misc_layout = QVBoxLayout(misc_group)
         self.debug_log_checkbox = QCheckBox("Подробные логи")
+        self.delete_vk_on_read_checkbox = QCheckBox(
+            "Удалять уведомления в VK после прочтения в Telegram"
+        )
         misc_layout.addWidget(self.debug_log_checkbox)
+        misc_layout.addWidget(self.delete_vk_on_read_checkbox)
         self.config_hint_label = QLabel(
             f"Настройки сохраняются в: {self.paths.config_path}\n"
             f"Лог-файл: {self.log_path}\n"
@@ -312,6 +316,7 @@ class MainWindow(QMainWindow):
             tg_api_hash=self.tg_api_hash_input.text().strip(),
             vk_token=self.vk_token_input.text().strip(),
             vk_user_id=self.vk_user_id_input.text().strip(),
+            delete_vk_on_read=self.delete_vk_on_read_checkbox.isChecked(),
             proxy_host=self.proxy_host_input.text().strip(),
             proxy_port=self.proxy_port_input.text().strip(),
             proxy_username=self.proxy_username_input.text().strip(),
@@ -325,6 +330,7 @@ class MainWindow(QMainWindow):
         self.tg_api_hash_input.setText(self.config.tg_api_hash)
         self.vk_token_input.setText(self.config.vk_token)
         self.vk_user_id_input.setText(self.config.vk_user_id)
+        self.delete_vk_on_read_checkbox.setChecked(self.config.delete_vk_on_read)
         self.proxy_host_input.setText(self.config.proxy_host)
         self.proxy_port_input.setText(self.config.proxy_port)
         self.proxy_username_input.setText(self.config.proxy_username)

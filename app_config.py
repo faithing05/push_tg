@@ -12,6 +12,7 @@ class AppConfig:
     tg_api_hash: str = ""
     vk_token: str = ""
     vk_user_id: str = ""
+    delete_vk_on_read: bool = False
     proxy_host: str = ""
     proxy_port: str = ""
     proxy_username: str = ""
@@ -24,6 +25,7 @@ class AppConfig:
 class AppPaths:
     app_dir: Path
     config_path: Path
+    message_links_path: Path
     logs_dir: Path
     log_path: Path
     session_dir: Path
@@ -44,6 +46,7 @@ def get_app_paths(base_dir: Path) -> AppPaths:
     return AppPaths(
         app_dir=app_dir,
         config_path=app_dir / "app_config.json",
+        message_links_path=app_dir / "message_links.json",
         logs_dir=app_dir / "logs",
         log_path=app_dir / "logs" / "app.log",
         session_dir=app_dir / "session",
@@ -59,6 +62,7 @@ def _build_config(data: dict) -> AppConfig:
         tg_api_hash=_normalize_string(data.get("tg_api_hash")),
         vk_token=_normalize_string(data.get("vk_token")),
         vk_user_id=_normalize_string(data.get("vk_user_id")),
+        delete_vk_on_read=bool(data.get("delete_vk_on_read", False)),
         proxy_host=_normalize_string(data.get("proxy_host")),
         proxy_port=_normalize_string(data.get("proxy_port")),
         proxy_username=_normalize_string(data.get("proxy_username")),
@@ -91,6 +95,7 @@ def load_config(paths: AppPaths) -> AppConfig:
         tg_api_hash=_normalize_string(os.getenv("TG_API_HASH")),
         vk_token=_normalize_string(os.getenv("VK_TOKEN")),
         vk_user_id=_normalize_string(os.getenv("VK_USER_ID")),
+        delete_vk_on_read=_normalize_string(os.getenv("DELETE_VK_ON_READ", "0")) == "1",
         proxy_host=_normalize_string(os.getenv("PROXY_HOST")),
         proxy_port=_normalize_string(os.getenv("PROXY_PORT")),
         proxy_username=_normalize_string(os.getenv("PROXY_USERNAME")),

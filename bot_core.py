@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import threading
 from concurrent.futures import Future
@@ -20,6 +21,7 @@ from app_config import AppConfig, AppPaths, migrate_legacy_session_if_needed
 
 LOGGER_NAME = "tg_notifier"
 VK_API_URL = "https://api.vk.com/method/messages.send"
+VK_DELETE_API_URL = "https://api.vk.com/method/messages.delete"
 VK_API_VERSION = "5.131"
 CONNECT_TIMEOUT = 30
 CONNECTION_RETRIES = 10
@@ -149,6 +151,82 @@ def build_message_content(message) -> str:
     return "[Сообщение без текста]"
 
 
+class MessageLinkStore:
+    def __init__(self, storage_path: Path) -> None:
+        self.storage_path = storage_path
+
+    def add(self, tg_chat_id: int, tg_message_id: int, vk_message_id: int) -> None:
+        links = self._load()
+        links.append(
+            {
+                "tg_chat_id": tg_chat_id,
+                "tg_message_id": tg_message_id,
+                "vk_message_id": vk_message_id,
+            }
+        )
+        self._save(links)
+
+    def pop_links_up_to(self, tg_chat_id: int, max_tg_message_id: int) -> list[dict[str, int]]:
+        links = self._load()
+        matched_links: list[dict[str, int]] = []
+        remaining_links: list[dict[str, int]] = []
+
+        for link in links:
+            if (
+                link.get("tg_chat_id") == tg_chat_id
+                and int(link.get("tg_message_id", 0)) <= max_tg_message_id
+            ):
+                if int(link.get("vk_message_id", 0)) > 0:
+                    matched_links.append(link)
+                continue
+            remaining_links.append(link)
+
+        if matched_links:
+            self._save(remaining_links)
+
+        return matched_links
+
+    def restore(self, links_to_restore: list[dict[str, int]]) -> None:
+        if not links_to_restore:
+            return
+
+        links = self._load()
+        links.extend(links_to_restore)
+        self._save(links)
+
+    def _load(self) -> list[dict[str, int]]:
+        if not self.storage_path.exists():
+            return []
+
+        try:
+            data = json.loads(self.storage_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+
+        if not isinstance(data, list):
+            return []
+
+        links: list[dict[str, int]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                links.append(
+                    {
+                        "tg_chat_id": int(item["tg_chat_id"]),
+                        "tg_message_id": int(item["tg_message_id"]),
+                        "vk_message_id": int(item["vk_message_id"]),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return links
+
+    def _save(self, links: list[dict[str, int]]) -> None:
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self.storage_path.write_text(json.dumps(links, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class TelegramVkNotifierService:
     def __init__(
         self,
@@ -179,6 +257,7 @@ class TelegramVkNotifierService:
         self._auth_mode = "idle"
         self._authorized_user = ""
         self._client_signature: tuple[str, ...] | None = None
+        self._message_link_store = MessageLinkStore(self.paths.message_links_path)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -223,7 +302,8 @@ class TelegramVkNotifierService:
         self.config = config
         self.logger.info("Конфигурация приложения обновлена")
         if self._loop:
-            self._schedule(self._rebuild_client_async())
+            future = self._schedule(self._rebuild_client_async())
+            future.result(timeout=30)
 
     def _thread_main(self) -> None:
         loop = asyncio.new_event_loop()
@@ -257,12 +337,14 @@ class TelegramVkNotifierService:
         self._emit_status("Сервис готов")
 
     async def _rebuild_client_async(self) -> None:
+        should_restart_monitoring = self._is_running
+
         if self._pending_qr_task is not None:
             self._pending_qr_task.cancel()
             self._pending_qr_task = None
 
         if self._client is not None and self._handler_registered:
-            self._client.remove_event_handler(self._handle_new_private_message)
+            self._unregister_handlers()
             self._handler_registered = False
 
         if self._client is not None and self._client.is_connected():
@@ -276,6 +358,8 @@ class TelegramVkNotifierService:
 
         if self._has_usable_config():
             await self._create_client_async()
+            if should_restart_monitoring:
+                await self._start_monitoring_async()
 
     def _build_client(self) -> TelegramClient:
         client_kwargs = {
@@ -491,7 +575,7 @@ class TelegramVkNotifierService:
                 return
 
             if not self._handler_registered:
-                self._client.add_event_handler(self._handle_new_private_message, events.NewMessage())
+                self._register_handlers()
                 self._handler_registered = True
 
             self._is_running = True
@@ -504,7 +588,7 @@ class TelegramVkNotifierService:
     async def _stop_monitoring_async(self) -> None:
         try:
             if self._client is not None and self._handler_registered:
-                self._client.remove_event_handler(self._handle_new_private_message)
+                self._unregister_handlers()
                 self._handler_registered = False
             if self._client is not None and self._client.is_connected():
                 await self._client.disconnect()
@@ -520,7 +604,7 @@ class TelegramVkNotifierService:
             self._pending_qr_task.cancel()
 
         if self._client is not None and self._handler_registered:
-            self._client.remove_event_handler(self._handle_new_private_message)
+            self._unregister_handlers()
             self._handler_registered = False
 
         if self._client is not None and self._client.is_connected():
@@ -560,9 +644,43 @@ class TelegramVkNotifierService:
 
         message_content = build_message_content(event.message)
         quote_message = not bool((event.message.raw_text or "").strip())
-        self._send_vk_notification(contact_name, message_content, quote_message)
+        vk_message_id = self._send_vk_notification(contact_name, message_content, quote_message)
+        if vk_message_id is not None and event.chat_id is not None:
+            self._message_link_store.add(event.chat_id, event.message.id, vk_message_id)
 
-    def _send_vk_notification(self, contact_name: str, message_content: str, quote_message: bool) -> None:
+    async def _handle_messages_read(self, event) -> None:
+        self.logger.debug(
+            "Сообщения прочитаны chat_id=%s max_id=%s inbox=%s",
+            event.chat_id,
+            event.max_id,
+            event.inbox,
+        )
+
+        if not self.config.delete_vk_on_read or not event.inbox or event.chat_id is None:
+            return
+
+        links_to_delete = self._message_link_store.pop_links_up_to(event.chat_id, event.max_id)
+        if not links_to_delete:
+            return
+
+        undeleted_vk_message_ids = self._delete_vk_notifications(
+            [link["vk_message_id"] for link in links_to_delete]
+        )
+        if undeleted_vk_message_ids:
+            self._message_link_store.restore(
+                [
+                    link
+                    for link in links_to_delete
+                    if link["vk_message_id"] in undeleted_vk_message_ids
+                ]
+            )
+
+    def _send_vk_notification(
+        self,
+        contact_name: str,
+        message_content: str,
+        quote_message: bool,
+    ) -> int | None:
         if quote_message:
             message_text = f'{contact_name}\n"{message_content}"'
         else:
@@ -583,19 +701,84 @@ class TelegramVkNotifierService:
         except requests.RequestException as error:
             self.logger.error("Ошибка сети при отправке в VK: %s", error)
             self._emit_status(f"Ошибка сети при отправке в VK: {error}")
-            return
+            return None
         except ValueError as error:
             self.logger.error("Не удалось разобрать ответ VK API: %s", error)
             self._emit_status(f"Не удалось разобрать ответ VK API: {error}")
-            return
+            return None
 
         if "error" in data:
             self.logger.error("VK API вернул ошибку: %s", data["error"])
             self._emit_status(f"VK API вернул ошибку: {data['error']}")
-            return
+            return None
+
+        vk_message_id = data.get("response")
+        if not isinstance(vk_message_id, int):
+            self.logger.error("VK API вернул неожиданный ответ на отправку: %s", data)
+            self._emit_status("VK API вернул неожиданный ответ на отправку")
+            return None
 
         self.logger.info("Уведомление в VK отправлено для контакта: %s", contact_name)
         self._emit_status(f"Уведомление отправлено для контакта: {contact_name}")
+        return vk_message_id
+
+    def _delete_vk_notifications(self, vk_message_ids: list[int]) -> list[int]:
+        payload = {
+            "access_token": self.config.vk_token,
+            "v": VK_API_VERSION,
+            "message_ids": ",".join(str(message_id) for message_id in vk_message_ids),
+            "delete_for_all": 1,
+        }
+
+        try:
+            response = requests.post(VK_DELETE_API_URL, data=payload, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+        except requests.RequestException as error:
+            self.logger.error("Ошибка сети при удалении из VK: %s", error)
+            self._emit_status(f"Ошибка сети при удалении из VK: {error}")
+            return vk_message_ids
+        except ValueError as error:
+            self.logger.error("Не удалось разобрать ответ VK API на удаление: %s", error)
+            self._emit_status(f"Не удалось разобрать ответ VK API на удаление: {error}")
+            return vk_message_ids
+
+        if "error" in data:
+            self.logger.error("VK API вернул ошибку при удалении: %s", data["error"])
+            self._emit_status(f"VK API вернул ошибку при удалении: {data['error']}")
+            return vk_message_ids
+
+        response_data = data.get("response")
+        if not isinstance(response_data, dict):
+            self.logger.error("VK API вернул неожиданный ответ на удаление: %s", data)
+            self._emit_status("VK API вернул неожиданный ответ на удаление")
+            return vk_message_ids
+
+        undeleted_message_ids: list[int] = []
+        deleted_count = 0
+        for message_id in vk_message_ids:
+            delete_status = response_data.get(str(message_id))
+            if delete_status == 1:
+                deleted_count += 1
+            else:
+                undeleted_message_ids.append(message_id)
+
+        if deleted_count:
+            self.logger.info("Удалено уведомлений VK: %s", deleted_count)
+            self._emit_status(f"Удалено уведомлений в VK: {deleted_count}")
+
+        return undeleted_message_ids
+
+    def _register_handlers(self) -> None:
+        assert self._client is not None
+        self._client.add_event_handler(self._handle_new_private_message, events.NewMessage())
+        self._client.add_event_handler(self._handle_messages_read, events.MessageRead(inbox=True))
+
+    def _unregister_handlers(self) -> None:
+        if self._client is None:
+            return
+        self._client.remove_event_handler(self._handle_new_private_message)
+        self._client.remove_event_handler(self._handle_messages_read)
 
     def _emit_status(self, message: str) -> None:
         self.logger.info(message)
