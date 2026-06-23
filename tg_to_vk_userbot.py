@@ -118,9 +118,31 @@ def log_debug(message: str) -> None:
         print(f"[DEBUG] {message}")
 
 
-def send_vk_notification(contact_name: str) -> None:
+def build_message_content(message) -> str:
+    """Возвращает текст сообщения или краткое название вложения."""
+    text = (message.raw_text or "").strip()
+    if text:
+        return text
+
+    if getattr(message, "photo", None):
+        return "фото"
+    if getattr(message, "video_note", None):
+        return "кружочек"
+    if getattr(message, "video", None):
+        return "видео"
+    if getattr(message, "voice", None):
+        return "голосовое"
+    if getattr(message, "sticker", None):
+        return "стикер"
+    if getattr(message, "document", None):
+        return "документ"
+
+    return "[Сообщение без текста]"
+
+
+def send_vk_notification(contact_name: str, message_content: str) -> None:
     """Отправляет уведомление в личные сообщения VK."""
-    message_text = f"Получено новое сообщение в Telegram от контакта: {contact_name}"
+    message_text = f'"{contact_name}"\n"{message_content}"'
     payload = {
         "access_token": VK_TOKEN,
         "v": VK_API_VERSION,
@@ -181,8 +203,9 @@ async def handle_new_private_message(event) -> None:
         log_debug("Сообщение пропущено: отправитель не является контактом Telegram")
         return
 
+    message_content = build_message_content(event.message)
     log_debug(f"Отправитель прошел фильтр контактов: {contact_name}")
-    send_vk_notification(contact_name)
+    send_vk_notification(contact_name, message_content)
 
 
 def authorize_with_phone() -> None:
