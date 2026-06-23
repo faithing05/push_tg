@@ -175,7 +175,7 @@ def build_message_content(message) -> str:
     if getattr(message, "video", None):
         return "видео"
     if getattr(message, "voice", None):
-        return "голосовое"
+        return "голосовое сообщение"
     if getattr(message, "audio", None):
         return "аудио"
     if getattr(message, "sticker", None):
@@ -214,9 +214,12 @@ def build_message_content(message) -> str:
     return "[Сообщение без текста]"
 
 
-def send_vk_notification(contact_name: str, message_content: str) -> None:
+def send_vk_notification(contact_name: str, message_content: str, quote_message: bool) -> None:
     """Отправляет уведомление в личные сообщения VK."""
-    message_text = f'"{contact_name}"\n"{message_content}"'
+    if quote_message:
+        message_text = f'{contact_name}\n"{message_content}"'
+    else:
+        message_text = f'{contact_name}\n{message_content}'
     payload = {
         "access_token": VK_TOKEN,
         "v": VK_API_VERSION,
@@ -278,8 +281,9 @@ async def handle_new_private_message(event) -> None:
         return
 
     message_content = build_message_content(event.message)
+    quote_message = not bool((event.message.raw_text or "").strip())
     log_debug(f"Отправитель прошел фильтр контактов: {contact_name}")
-    send_vk_notification(contact_name, message_content)
+    send_vk_notification(contact_name, message_content, quote_message)
 
 
 def authorize_with_phone() -> None:
