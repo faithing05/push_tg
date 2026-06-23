@@ -1,4 +1,9 @@
 .env
+app_config.json
 *.session
 *.session-journal
 __pycache__/
+logs/
+dist/
+build/
+*.spec
